@@ -10,7 +10,8 @@
  *       binary_sensor.flic_<address>
  *       sensor.flic_<address>_battery
  *       binary_sensor.flic_<address>_connectivity
- *   - Fires a flic_click event with button_name, button_address, and click_type.
+ *   - Fires a flic_click event with a stable button_name, the Flic app's
+ *     button_friendly_name, button_address, and click_type.
  *   - Refreshes battery and connectivity states at a configurable interval.
  *   - Deletes the three Home Assistant states when a button is removed.
  *
@@ -34,8 +35,10 @@
  *   A Flic Hub with Hub Studio/SDK access, network access to Home Assistant,
  *   and a Home Assistant long-lived access token.
  *
- * Version: 1.0.0
+ * Version: 1.1.0
  * Changelog:
+ *   1.1.0 - Added Flic app names to events and state attributes, and refresh
+ *           Home Assistant names when the SDK reports buttonUpdated.
  *   1.0.0 - Combined upstream 1.2.6 files; added configuration validation,
  *           null guards, concise status-aware logging, and token-safe logs.
  *
@@ -119,6 +122,7 @@ const STATE_OFF = "off";
 // The timestamp map is intentionally in memory. A package restart clears old
 // debounce state so the first click after restart is never discarded.
 const lastEventTimestampByButton = {};
+const buttonStateByButton = {};
 let homeAssistantUrl;
 
 start();
@@ -196,6 +200,16 @@ function registerButtonListeners() {
     withButton(event.bdaddr, "buttonConnected", initializeButton);
   });
 
+  // buttonUpdated is emitted after changes such as renaming a button in the
+  // Flic app. Refresh every Home Assistant state without resetting debounce.
+  buttonManager.on("buttonUpdated", function (event) {
+    if (event.button) {
+      refreshButtonStates(event.button);
+      return;
+    }
+    withButton(event.bdaddr, "buttonUpdated", refreshButtonStates);
+  });
+
   buttonManager.on("buttonDeleted", function (event) {
     deleteButton(event);
   });
@@ -210,13 +224,13 @@ function registerButtonListeners() {
 
   buttonManager.on("buttonDown", function (event) {
     withButton(event.bdaddr, "buttonDown", function (button) {
-      sendButtonState(button, STATE_ON);
+      setButtonState(button, STATE_ON);
     });
   });
 
   buttonManager.on("buttonUp", function (event) {
     withButton(event.bdaddr, "buttonUp", function (button) {
-      sendButtonState(button, STATE_OFF);
+      setButtonState(button, STATE_OFF);
     });
   });
 
@@ -270,9 +284,25 @@ function initializeButton(button) {
   const buttonName = getButtonEntityName(button);
   lastEventTimestampByButton[buttonName] = Date.now() - CONFIG.EVENT_DEBOUNCE_MS;
 
-  sendButtonState(button, STATE_OFF);
+  setButtonState(button, STATE_OFF);
   sendButtonBatteryState(button);
   sendButtonConnectivityState(button);
+}
+
+function refreshButtonStates(button) {
+  const buttonName = getButtonEntityName(button);
+  const state = Object.prototype.hasOwnProperty.call(buttonStateByButton, buttonName)
+    ? buttonStateByButton[buttonName]
+    : STATE_OFF;
+
+  sendButtonState(button, state);
+  sendButtonBatteryState(button);
+  sendButtonConnectivityState(button);
+}
+
+function setButtonState(button, state) {
+  buttonStateByButton[getButtonEntityName(button)] = state;
+  sendButtonState(button, state);
 }
 
 function syncButtonDiagnostics() {
@@ -286,6 +316,7 @@ function syncButtonDiagnostics() {
 function deleteButton(buttonReference) {
   const buttonName = getButtonEntityName(buttonReference);
   delete lastEventTimestampByButton[buttonName];
+  delete buttonStateByButton[buttonName];
 
   requestHomeAssistant(
     "DELETE",
@@ -313,9 +344,7 @@ function sendButtonState(button, state) {
     "/api/states/binary_sensor." + getButtonEntityName(button),
     {
       state: state,
-      attributes: {
-        friendly_name: getButtonFriendlyName(button)
-      }
+      attributes: getButtonIdentityAttributes(button)
     },
     "update button state"
   );
@@ -332,10 +361,10 @@ function sendButtonBatteryState(button) {
     {
       state: battery,
       attributes: {
+        ...getButtonIdentityAttributes(button, "Battery"),
         device_class: "battery",
         unit_of_measurement: "%",
-        icon: getBatteryIcon(battery),
-        friendly_name: getButtonFriendlyName(button, "Battery")
+        icon: getBatteryIcon(battery)
       }
     },
     "update battery state"
@@ -349,9 +378,9 @@ function sendButtonConnectivityState(button) {
     {
       state: button.ready ? STATE_ON : STATE_OFF,
       attributes: {
+        ...getButtonIdentityAttributes(button, "Connectivity"),
         device_class: "connectivity",
-        icon: button.ready ? "mdi:bluetooth" : "mdi:bluetooth-off",
-        friendly_name: getButtonFriendlyName(button, "Connectivity")
+        icon: button.ready ? "mdi:bluetooth" : "mdi:bluetooth-off"
       }
     },
     "update connectivity state"
@@ -364,6 +393,7 @@ function sendButtonEvent(button, clickType) {
     "/api/events/flic_click",
     {
       button_name: getButtonEntityName(button),
+      button_friendly_name: getButtonFriendlyName(button),
       button_address: button.bdaddr,
       click_type: clickType
     },
@@ -436,6 +466,14 @@ function getButtonFriendlyName(button, suffix) {
     name += " " + suffix;
   }
   return name;
+}
+
+function getButtonIdentityAttributes(button, suffix) {
+  return {
+    friendly_name: getButtonFriendlyName(button, suffix),
+    flic_name: getButtonFriendlyName(button),
+    button_address: button.bdaddr
+  };
 }
 
 function getBatteryIcon(batteryLevel) {

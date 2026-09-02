@@ -12,6 +12,7 @@ and configuration easier.
 ## Features
 
 - Fires `flic_click` events for single, double, and hold actions.
+- Includes the user-assigned Flic app name in events and entity attributes.
 - Publishes button state, battery level, and connectivity to Home Assistant.
 - Refreshes battery and connectivity states on a configurable interval.
 - Removes generated Home Assistant states when a Flic is deleted from the hub.
@@ -91,11 +92,27 @@ Each click fires this event:
 event_type: flic_click
 event_data:
   button_name: flic_80e4da779fc7
+  button_friendly_name: Living Room Button
   button_address: "80:e4:da:77:9f:c7"
   click_type: single
 ```
 
 `click_type` is `single`, `double`, or `hold`.
+
+### Button names and stable IDs
+
+`button_name` and the generated entity IDs remain based on the Bluetooth
+address. This makes them unique and prevents a Flic app rename from breaking
+automations or creating replacement entities.
+
+`button_friendly_name` contains the user-assigned name from the Flic app. The
+same value is used for each entity's Home Assistant `friendly_name` and is also
+available in the `flic_name` state attribute. The original Bluetooth address is
+available in the `button_address` state attribute.
+
+Renaming a button in the Flic app causes the module to refresh its button,
+battery, and connectivity states when the Flic SDK emits `buttonUpdated`. The
+stable entity IDs and `button_name` event value do not change.
 
 Example automation:
 
