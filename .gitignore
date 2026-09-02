@@ -1,0 +1,25 @@
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local credentials and certificate material
+.env
+.env.*
+*.key
+*.pem
+main.local.js
+config.local.js
+
+# Logs and temporary files
+*.log
+*.tmp
+tmp/
+temp/
+
+# Node tooling, if used for local checks
+node_modules/
+coverage/
