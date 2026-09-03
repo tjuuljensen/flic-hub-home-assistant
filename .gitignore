@@ -23,3 +23,6 @@ temp/
 # Node tooling, if used for local checks
 node_modules/
 coverage/
+
+# Flic Hub Studio generates this package-container metadata automatically.
+/module.json

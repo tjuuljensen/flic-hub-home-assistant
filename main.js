@@ -12,15 +12,19 @@
  *       binary_sensor.flic_<address>_connectivity
  *   - Fires a flic_click event with a stable button_name, the Flic app's
  *     button_friendly_name, button_address, and click_type.
- *   - Refreshes battery and connectivity states at a configurable interval.
+ *   - Republishes all states at a configurable interval so REST-created
+ *     entities return automatically after a Home Assistant restart.
+ *   - Adds the configured hub name and SDK-provided hub serial number to every
+ *     state and click event, allowing multiple hubs to be distinguished.
  *   - Deletes the three Home Assistant states when a button is removed.
  *
  * Usage:
  *   1. Ensure Home Assistant has the `api:` integration enabled.
  *   2. Create a Home Assistant long-lived access token from your user profile.
  *   3. In Flic Hub Studio, create a package and replace its main.js with this file.
- *      Older Studio versions may retain a generated module.json metadata file;
- *      no other JavaScript files are needed.
+ *      Hub Studio creates module.json automatically; leave it as generated.
+ *      Its version describes the Studio package container, while this file
+ *      logs the bridge version at startup. No other source files are needed.
  *   4. Edit only the USER CONFIGURATION section below, then run the package.
  *   5. Confirm successful startup and requests in the Hub Studio console.
  *
@@ -35,8 +39,10 @@
  *   A Flic Hub with Hub Studio/SDK access, network access to Home Assistant,
  *   and a Home Assistant long-lived access token.
  *
- * Version: 1.1.0
+ * Version: 1.2.0
  * Changelog:
+ *   1.2.0 - Republish all button states periodically for Home Assistant restart
+ *           recovery; add hub identity to states, events, and dashboard data.
  *   1.1.0 - Added Flic app names to events and state attributes, and refresh
  *           Home Assistant names when the SDK reports buttonUpdated.
  *   1.0.0 - Combined upstream 1.2.6 files; added configuration validation,
@@ -46,29 +52,7 @@
  *   https://github.com/blunan/flic-hub-home-assistant-module
  *   Upstream version 1.2.6, reviewed at commit
  *   b944896861ac88b5263936f390e6873c2ab6d90b.
- *
- * MIT License
- *
- * Copyright (c) 2021 Brayan Luna
- * Copyright (c) 2026 Torsten Juul-Jensen
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Full MIT license text is retained at the end of this standalone file.
  */
 
 // -----------------------------------------------------------------------------
@@ -77,6 +61,11 @@
 // -----------------------------------------------------------------------------
 
 const CONFIG = {
+  // The Flic Hub SDK does not expose the hub name assigned in the Flic app.
+  // Set a unique, friendly name in each hub's copy, for example "Kitchen Hub".
+  // Leave blank to use "Flic Hub <serial number>" automatically.
+  HUB_NAME: "",
+
   // Include http:// or https:// and the Home Assistant port when required.
   // Do not add /api or a trailing slash.
   HOME_ASSISTANT_URL: "http://192.168.1.10:8123",
@@ -89,7 +78,9 @@ const CONFIG = {
   // exactly one single/double/hold event and rapid consecutive clicks matter.
   EVENT_DEBOUNCE_MS: 600,
 
-  // Battery and connectivity refresh interval. One minute matches upstream.
+  // Republish every button, battery, and connectivity state at this interval.
+  // This recreates the REST states after Home Assistant restarts. With the
+  // default, they can be absent for at most about one minute after HA is ready.
   STATUS_SYNC_INTERVAL_MS: 1 * 60 * 1000,
 
   // Battery percentages at or below this value use the alert icon.
@@ -112,7 +103,11 @@ const CONFIG = {
 
 const http = require("http");
 const buttonManager = require("buttons");
+const hubInfo = require("hubinfo");
 
+// This is the authoritative version of the bridge code copied to the hub.
+// Hub Studio's automatically generated module.json may keep version 1.0.0.
+const MODULE_VERSION = "1.2.0";
 const CLICK_SINGLE = "single";
 const CLICK_DOUBLE = "double";
 const CLICK_HOLD = "hold";
@@ -124,12 +119,14 @@ const STATE_OFF = "off";
 const lastEventTimestampByButton = {};
 const buttonStateByButton = {};
 let homeAssistantUrl;
+let hubName;
 
 start();
 
 function start() {
   validateConfiguration();
   homeAssistantUrl = CONFIG.HOME_ASSISTANT_URL.replace(/\/+$/, "");
+  hubName = getHubName();
 
   const buttons = buttonManager.getButtons();
   for (let index = 0; index < buttons.length; index += 1) {
@@ -137,10 +134,11 @@ function start() {
   }
 
   registerButtonListeners();
-  setInterval(syncButtonDiagnostics, CONFIG.STATUS_SYNC_INTERVAL_MS);
+  setInterval(syncAllButtonStates, CONFIG.STATUS_SYNC_INTERVAL_MS);
 
   console.log(
-    "Flic Home Assistant bridge started for " + buttons.length + " button(s)."
+    "Flic Home Assistant bridge v" + MODULE_VERSION + " started as " +
+    hubName + " for " + buttons.length + " button(s)."
   );
 }
 
@@ -148,6 +146,10 @@ function validateConfiguration() {
   const errors = [];
   const url = String(CONFIG.HOME_ASSISTANT_URL || "").trim();
   const token = String(CONFIG.HOME_ASSISTANT_TOKEN || "").trim();
+
+  if (typeof CONFIG.HUB_NAME !== "string") {
+    errors.push("HUB_NAME must be a string (it may be blank).");
+  }
 
   if (!/^https?:\/\/[^/]/.test(url)) {
     errors.push("HOME_ASSISTANT_URL must start with http:// or https://.");
@@ -305,11 +307,13 @@ function setButtonState(button, state) {
   sendButtonState(button, state);
 }
 
-function syncButtonDiagnostics() {
+function syncAllButtonStates() {
+  // States posted through /api/states have no owning HA integration and are not
+  // restored to HA's state machine after a restart. Republishing all states -
+  // including the main button state - makes them return without user action.
   const buttons = buttonManager.getButtons();
   for (let index = 0; index < buttons.length; index += 1) {
-    sendButtonBatteryState(buttons[index]);
-    sendButtonConnectivityState(buttons[index]);
+    refreshButtonStates(buttons[index]);
   }
 }
 
@@ -395,6 +399,8 @@ function sendButtonEvent(button, clickType) {
       button_name: getButtonEntityName(button),
       button_friendly_name: getButtonFriendlyName(button),
       button_address: button.bdaddr,
+      hub_name: hubName,
+      hub_serial_number: getHubSerialNumber(),
       click_type: clickType
     },
     "fire " + clickType + " click event"
@@ -472,8 +478,19 @@ function getButtonIdentityAttributes(button, suffix) {
   return {
     friendly_name: getButtonFriendlyName(button, suffix),
     flic_name: getButtonFriendlyName(button),
-    button_address: button.bdaddr
+    button_address: button.bdaddr,
+    hub_name: hubName,
+    hub_serial_number: getHubSerialNumber()
   };
+}
+
+function getHubName() {
+  const configuredName = String(CONFIG.HUB_NAME || "").trim();
+  return configuredName || "Flic Hub " + getHubSerialNumber();
+}
+
+function getHubSerialNumber() {
+  return String(hubInfo.serialNumber || "unknown");
 }
 
 function getBatteryIcon(batteryLevel) {
@@ -485,3 +502,28 @@ function getBatteryIcon(batteryLevel) {
   }
   return "mdi:battery-" + Math.floor(batteryLevel / 10) * 10;
 }
+
+/*
+ * MIT License
+ *
+ * Copyright (c) 2021 Brayan Luna
+ * Copyright (c) 2026 Torsten Juul-Jensen
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
