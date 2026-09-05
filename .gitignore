@@ -12,7 +12,9 @@ Thumbs.db
 *.key
 *.pem
 main.local.js
+*/main.local.js
 config.local.js
+*/config.local.js
 
 # Logs and temporary files
 *.log

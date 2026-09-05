@@ -1,0 +1,61 @@
+# Requires custom:auto-entities. Both editions publish the same entity-ID
+# pattern and grouping attributes, so this card is transport-independent.
+type: custom:auto-entities
+card:
+  type: entities
+  title: Flic buttons
+  show_header_toggle: false
+  state_color: true
+card_param: entities
+show_empty: false
+filter:
+  template: |
+    {% set batteries = states.sensor
+      | selectattr('entity_id', 'match', '^sensor[.]flic_[0-9a-f]{12}_battery$')
+      | list %}
+    {% set discovered = namespace(hubs=[]) %}
+    {% for battery in batteries %}
+      {% set serial = battery.attributes.hub_serial_number | default('unknown', true) | string %}
+      {% set existing = discovered.hubs
+        | selectattr('serial', 'equalto', serial)
+        | list %}
+      {% if existing | length == 0 %}
+        {% set discovered.hubs = discovered.hubs + [{
+          'serial': serial,
+          'name': battery.attributes.hub_name | default('Unknown Flic Hub', true)
+        }] %}
+      {% endif %}
+    {% endfor %}
+    [
+    {% for hub in discovered.hubs | sort(attribute='name', case_sensitive=false) %}
+      {% if not loop.first %},{% endif %}
+      {
+        "type": "section",
+        "label": {{ ('Hub: ' ~ hub.name) | to_json }}
+      }
+      {% for battery in batteries | sort(attribute='attributes.flic_name', case_sensitive=false) %}
+        {% set battery_serial = battery.attributes.hub_serial_number | default('unknown', true) | string %}
+        {% if battery_serial == hub.serial %}
+          {% set object_id = battery.object_id.removesuffix('_battery') %}
+          {% set label = battery.attributes.flic_name | default(battery.name, true) %}
+          ,{
+            "type": "section",
+            "label": {{ label | to_json }}
+          },
+          {
+            "entity": "binary_sensor.{{ object_id }}",
+            "name": "Button",
+            "secondary_info": "last-changed"
+          },
+          {
+            "entity": "sensor.{{ object_id }}_battery",
+            "name": "Battery"
+          },
+          {
+            "entity": "binary_sensor.{{ object_id }}_connectivity",
+            "name": "Connectivity"
+          }
+        {% endif %}
+      {% endfor %}
+    {% endfor %}
+    ]

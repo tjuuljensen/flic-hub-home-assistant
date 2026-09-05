@@ -1,5 +1,5 @@
 /*
- * Flic Hub to Home Assistant - single-file module
+ * Flic Hub to Home Assistant - single-file REST edition
  *
  * Purpose:
  *   Forward Flic button states, battery levels, connectivity, and click events
